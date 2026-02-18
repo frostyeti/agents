@@ -1,0 +1,7 @@
+{
+    "[skill]": {
+        "editor.defaultFormatter": "DavidAnson.vscode-markdownlint",
+        "editor.formatOnSave": true,
+        "editor.formatOnType": false
+    }
+}
