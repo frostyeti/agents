@@ -1,14 +1,22 @@
 # Cast Task Runner
 
-Cast is a task runner and automation tool written in Go. It provides a declarative way to define and run tasks using a `castfile` configuration file.
+Cast is a task runner and automation tool written in Go. It provides a declarative way to define and run tasks, workflows, and remote execution using a `castfile` configuration file.
 
 ## Installation
 
-Cast can be installed from the GitHub repository:
+Cast can be installed using official scripts:
 
+### Linux / macOS
 ```bash
-go install github.com/frostyeti/cast@latest
+curl -sL https://raw.githubusercontent.com/frostyeti/cast/master/eng/scripts/install.sh | bash
 ```
+
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/frostyeti/cast/master/eng/scripts/install.ps1 | iex
+```
+
+*By default, Cast installs to `~/.local/bin` (Linux/Mac) or `~/AppData/Local/Programs/bin` (Windows). Override this by setting the `CAST_INSTALL_DIR` environment variable before running.*
 
 ## Quick Reference
 
@@ -20,6 +28,16 @@ go install github.com/frostyeti/cast@latest
 | `cast list` or `cast ls` | List all available tasks |
 | `cast -p <path>` | Specify project file or directory |
 | `cast -c <context>` | Use a specific context |
+| `cast @workspace <task>` | Run a task from a specific workspace child project |
+| `cast run --job <job>` | Run a job and all its downstream jobs |
+| `cast exec -- <cmd>` | Ad-hoc execution wrapped in the Castfile's environment |
+
+## Autocompletion
+Cast supports shell autocompletion for tasks, jobs, and workspace projects!
+
+**Bash:** `echo 'source <(cast completion bash)' >> ~/.bashrc`
+**Zsh:** `echo 'source <(cast completion zsh)' >> ~/.zshrc`
+**PowerShell:** `Invoke-Expression (&cast completion powershell)`
 
 ## Configuration File
 
@@ -35,9 +53,13 @@ version: "0.1.0"
 
 env:
   VAR_NAME: "value"
+  # Support for command substitution
+  DB_PASS: $(aws secretsmanager get-secret-value --secret-id pass)
 
 dotenv:
-  - ".env"
+  - path: ".env"
+  - path: ".env.production"
+    contexts: [prod]
 
 tasks:
   task-name:
@@ -52,20 +74,20 @@ tasks:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `uses` | string | Runtime: `bash`, `sh`, `pwsh`, `powershell`, `python`, `node`, `bun`, `deno`, `ruby`, `go`, `dotnet`, `ssh`, `scp`, `tmpl`, `shell` |
+| `uses` | string | Runtime: `bash`, `python`, `node`, `deno`, `go`, `ssh`, `docker://image:tag`, or relative path `./script.sh` |
 | `run` | string | The script/command to execute |
 | `desc` | string | Brief description of the task |
-| `help` | string | Detailed help message |
 | `env` | object/array | Environment variables for the task |
-| `dotenv` | array | .env files to load |
+| `dotenv` | array | .env files to load specific to the task |
 | `cwd` | string | Working directory |
 | `needs` | array | Tasks that must run first (dependencies) |
+| `hooks` | object | `{ before: [task], after: [task] }` execution hooks |
 | `timeout` | string | Timeout (e.g., `30s`, `2m`, `1h`) |
-| `if` | boolean/string | Conditional execution (e.g., `os == 'windows'`) |
-| `force` | boolean/string | Run even if dependencies fail |
+| `if` | string | Conditional execution (e.g., `env.BRANCH == 'main'`) evaluated via the 'expr' library |
+| `force` | string | Run even if dependencies fail |
 | `hosts` | array | Remote hosts to run task on |
-| `template` | boolean/string | Evaluate `run` as a template |
-| `with` | object | Additional parameters (e.g., `script` for external files) |
+| `template` | string | Render text dynamically |
+| `with` | object | Additional parameters |
 
 ### Example Tasks
 
@@ -74,198 +96,108 @@ tasks:
   build:
     desc: "Build the project"
     uses: bash
+    run: npm run build
+
+  test-in-docker:
+    uses: docker://golang:1.21
+    run: go test ./...
+
+  remote-deploy:
+    hosts: [web-server]
+    uses: ssh
+    # Go text templates evaluate locally before remote execution!
     run: |
-      npm run build
-
-  test:
-    desc: "Run tests"
-    uses: bash
-    run: npm test
-    needs:
-      - build
-    timeout: "5m"
-
-  deno-script:
-    uses: deno
-    run: |
-      console.log('Hello from Deno!');
-
-  external-script:
-    uses: bash
-    with:
-      script: "./scripts/deploy.sh"
+      echo "Deploying to {{ .Host.Host }} as {{ .Host.User }}"
+      cd /var/www/app
+      docker-compose up -d
 
   conditional:
+    cwd: ./build
     uses: bash
-    run: echo "Windows only"
-    if: "os == 'windows'"
-
-  remote-task:
-    uses: ssh
-    run: |
-      echo "Running on remote host"
-    hosts: ["server1"]
+    run: npm publish
+    if: env.BRANCH == 'main'
 ```
 
-## Listing Tasks
+## Jobs
 
-```bash
-cast list
-cast ls
+Jobs group tasks into complex CI/CD-style pipelines.
+
+```yaml
+jobs:
+  build-all:
+    steps:
+      - run: build
+  
+  deploy-all:
+    needs: [build-all]
+    steps:
+      - run: deploy
 ```
 
-Output shows task names with descriptions.
+Run a job (and downstream): `cast run --job build-all`
 
-## Running Tasks
+## Contexts
 
-```bash
-cast                 # Run default task
-cast build           # Run 'build' task
-cast run build       # Explicit run command
-cast build test      # Run multiple tasks
-cast @project build  # Run task from workspace project
-```
-
-### CLI Flags
-
-```bash
-cast build -p ./path/to/castfile    # Specify project file
-cast build -p ./myproject           # Specify project directory
-cast build -c production            # Use context
-cast build -e KEY=value             # Set environment variable
-cast build -E .env.local            # Load dotenv file
-cast build -- --arg1 --arg2         # Pass arguments to task
-```
-
-## Dependencies
-
-Tasks can depend on other tasks using the `needs` property:
+Contexts dynamically route tasks and configuration. 
 
 ```yaml
 tasks:
-  install:
-    uses: bash
-    run: npm install
+  "deploy:prod":
+    run: echo "Production Deploy"
+  
+  "deploy:dev":
+    run: echo "Dev Deploy"
+```
+Command `cast run deploy -c prod` will automatically route to `deploy:prod`.
 
-  build:
-    uses: bash
-    run: npm run build
-    needs:
-      - install
+## Remote Workloads & Modularity
 
-  deploy:
-    uses: bash
-    run: npm run deploy
-    needs:
-      - build
+### Standalone Inventories
+Load remote hosts from separate yaml files:
+```yaml
+inventories:
+  - ./production.yaml
+  - ./staging.yaml
 ```
 
-## Remote Execution
-
-Define hosts in the inventory:
-
+### Remote Git Imports
+Import tasks from Git repositories directly:
 ```yaml
-inventory:
-  hosts:
-    server1:
-      host: 192.168.1.100
-      user: deploy
-      tags: ["production"]
+imports:
+  - from: github.com/frostyeti/shared-tasks
+    ns: core
 
 tasks:
   deploy:
-    uses: ssh
-    run: |
-      systemctl restart myservice
-    hosts: ["server1"]
+    needs: [core:build]
+    run: echo "Deploying..."
 ```
+
+### Workspaces
+Manage sub-projects efficiently without needing to `cd` into their directories.
+```yaml
+workspace:
+  include:
+    - "services/**"
+```
+Execute child task: `cast @frontend deploy -c prod`
 
 ## Environment Variables
 
-Environment variables can be defined globally or per task.
+Environment variables can be defined globally or per task, and support both string interpolation and command substitution (`$()`).
 
-Environment variables can also be loaded from `.env` files
-using the `dotenv` property, which supports multiple files and optional files (with `?` suffix).
+Dotenv files support multiple files, optional files (`?` prefix), and context targeting.
 
 ```yaml
-env:
-  GLOBAL_VAR: "value"
-  SECRET_VAR:
-    name: "API_KEY"
-    value: "secret"
-    secret: true
-  PG_PASS: $(kpv ensure --name "PG_PASS" --size 32)
-
 dotenv:
-  - ".env"
-  - ".env.local?" # Optional .env file, won't error if missing
+  - path: .env
+  - path: ?.env.local # Optional, won't error if missing
 
 tasks:
   task:
     uses: bash
-    run: echo $GLOBAL_VAR && echo $SECRET_VAR && echo $PG_PASS
-    env:
-      LOCAL_VAR: "local"
+    run: echo $GLOBAL_VAR
 ```
-
-## When to Use Cast vs Alternatives
-
-### Prefer Bash for Simple Tasks
-
-For simple, single-command tasks, prefer using bash directly:
-
-```bash
-npm run build
-npm test
-```
-
-Even on Windows, bash is available through Git for Windows installation.
-
-### Prefer Cast When
-
-- Multiple related tasks need coordination
-- Tasks have dependencies
-- Need declarative configuration
-- Working with remote hosts
-- Need cross-platform task definitions
-- Tasks require specific runtimes (deno, bun, etc.)
-
-### For Complex Scripting
-
-**Prefer Deno** for complex tasks because:
-- Single binary install (no package.json required)
-- Can reference npm/jsr modules with versions in-script
-- TypeScript support out of the box
-- Secure by default with permission flags
-
-```yaml
-tasks:
-  complex:
-    uses: deno
-    run: |
-      import { parse } from "https://deno.land/std@0.208.0/flags/mod.ts";
-      const args = parse(Deno.args);
-      console.log(args);
-```
-
-**Bun** is also a good option:
-- Single binary install
-- Fast execution
-- npm ecosystem compatibility
-
-```yaml
-tasks:
-  complex:
-    uses: bun
-    run: |
-      console.log("Hello from Bun");
-```
-
-## JSON Schemas
-
-JSON schemas are available for IDE validation:
-- `castfile.schema.json` - Main configuration schema
-- `cast.module.schema.json` - Module schema for imports
 
 ## CAST_ Environment Variables
 
@@ -276,21 +208,12 @@ JSON schemas are available for IDE validation:
 | `CAST_PROJECT` | Default project file path (used by `-p` flag) |
 | `CAST_CONTEXT` | Default context name (used by `-c` flag) |
 
-### XDG Directories (set globally)
-
-| Variable | Description |
-|----------|-------------|
-| `CAST_XDG_DATA_HOME` | XDG data directory (defaults to `~/.local/share`) |
-| `CAST_XDG_CONFIG_HOME` | XDG config directory (defaults to `~/.config`) |
-| `CAST_XDG_CACHE_HOME` | XDG cache directory (defaults to `~/.cache`) |
-| `CAST_XDG_BIN_HOME` | XDG bin directory (defaults to `~/.local/bin`) |
-
 ### Task Runtime (available within tasks)
 
 | Variable | Description |
 |----------|-------------|
-| `CAST_ENV` | Path to temp file for sharing environment between tasks |
-| `CAST_PATH` | Path to temp file for sharing PATH entries between tasks |
+| `CAST_ENV` | Path to temp file. Write `KEY=value` here to share environment to downstream tasks |
+| `CAST_PATH` | Path to temp file. Write directories here to prepend them to the `$PATH` |
 | `CAST_OUTPUTS` | Path to temp file for sharing outputs between tasks |
 
 ### Module Tasks (set on tasks from imported modules)
@@ -303,8 +226,6 @@ JSON schemas are available for IDE validation:
 | `CAST_PARENT_DIR` | Directory containing the parent project's castfile |
 | `CAST_MODULE_ID` | Module's unique identifier |
 | `CAST_MODULE_NAME` | Module's name |
-| `CAST_MODULE_VERSION` | Module's version |
-| `CAST_MODULE_DESCRIPTION` | Module's description |
 
 ### Using CAST_ENV for Task Communication
 
@@ -324,22 +245,4 @@ tasks:
       echo "API_KEY from env: $API_KEY"
     needs:
       - load-env
-```
-
-### Using CAST_PATH for PATH Updates
-
-Tasks can add directories to PATH for subsequent tasks:
-
-```yaml
-tasks:
-  setup-path:
-    uses: bash
-    run: |
-      echo "/custom/bin" >> $CAST_PATH
-
-  use-custom-tool:
-    uses: bash
-    run: custom-tool --version
-    needs:
-      - setup-path
 ```
